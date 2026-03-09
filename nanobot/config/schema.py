@@ -1,5 +1,10 @@
 """Configuration schema using Pydantic."""
 
+from __future__ import annotations
+
+import json
+import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -329,6 +334,42 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
+def _fix_nanobot_env_values() -> None:
+    """Fix common env-var formatting issues *in-place* before parsing.
+
+    Handles the case where a ``list[str]`` field is set to something like
+    ``[*]`` instead of the required ``["*"]``.  Railway (and other PaaS
+    dashboards) often strip quotes from values, producing invalid JSON.
+
+    Must run at module level, *before* pydantic-settings creates its
+    ``EnvSettingsSource`` (which caches env vars at init time).
+    """
+    prefix = "NANOBOT_"
+    bad_json_array = re.compile(
+        r"^\[(?!\s*\])"  # starts with '[' (but not empty '[]')
+        r"(?!.*\")"       # no double-quotes anywhere inside
+        r"(.*)\]$",       # capture inner content up to ']'
+    )
+    for key in list(os.environ):
+        if not key.startswith(prefix):
+            continue
+        value = os.environ[key]
+        m = bad_json_array.match(value)
+        if m:
+            inner = m.group(1).strip()
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
+            fixed = json.dumps(parts)
+            os.environ[key] = fixed
+            warnings.warn(
+                f"Auto-fixed env var {key}: {value!r} -> {fixed!r}",
+                stacklevel=2,
+            )
+
+
+# Fix malformed env vars BEFORE any BaseSettings subclass is instantiated.
+_fix_nanobot_env_values()
 
 
 class _LenientEnvSource:
