@@ -3,9 +3,11 @@
 from pathlib import Path
 from typing import Literal
 
+import warnings
+
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 
 class Base(BaseModel):
@@ -329,6 +331,30 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class _LenientEnvSource:
+    """Wraps EnvSettingsSource to gracefully handle parsing failures.
+
+    When the process inherits environment variables from a wrapper (e.g. OpenClaw
+    on Railway), env vars that match the NANOBOT_ prefix but can't be parsed into
+    complex nested models (like ChannelsConfig) would crash on startup.  This
+    wrapper catches those errors and falls back to an empty dict so the JSON
+    config file (or defaults) are used instead.
+    """
+
+    def __init__(self, source: PydanticBaseSettingsSource):
+        self._source = source
+
+    def __call__(self) -> dict:
+        try:
+            return self._source()
+        except Exception as exc:
+            warnings.warn(
+                f"Ignoring NANOBOT_* env vars due to parse error: {exc}",
+                stacklevel=2,
+            )
+            return {}
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -337,6 +363,22 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            _LenientEnvSource(env_settings),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     @property
     def workspace_path(self) -> Path:
